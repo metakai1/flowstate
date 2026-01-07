@@ -1,0 +1,50 @@
+# FLOWSTATE Configuration
+
+# Corpus settings
+corpus:
+  path: "data/corpus.json"
+
+# Rekordbox integration
+rekordbox:
+  db_path: null  # Auto-detect if null
+  poll_interval: 5.0  # seconds
+
+# Gemini API (for analysis)
+gemini:
+  model: "gemini-2.5-pro"
+  max_concurrent: 3
+  requests_per_minute: 50
+
+# Recommendation engine
+scoring:
+  bpm_range: 6.0
+  allow_key_clash: false
+
+  weights:
+    energy_trajectory: 1.0
+    danceability: 0.8
+    vibe_compatibility: 0.7
+    narrative_flow: 0.6
+    key_quality: 0.5
+    groove_compatibility: 0.4
+    mix_ease: 0.4
+    genre_affinity: 0.3
+
+  directions:
+    up:
+      min_energy_delta: 1
+      max_energy_delta: 3
+    hold:
+      max_energy_delta: 1
+    down:
+      min_energy_delta: 1
+      max_energy_delta: 3
+
+# UI settings
+ui:
+  mode: "terminal"  # terminal or web
+  top_n: 5  # tracks per direction
+
+  web:
+    host: "0.0.0.0"
+    port: 5000
