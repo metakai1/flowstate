@@ -1,5 +1,5 @@
 """User interfaces."""
 
-from .terminal import TerminalUI
+from .terminal import Dashboard, TerminalUI
 
-__all__ = ["TerminalUI"]
+__all__ = ["Dashboard", "TerminalUI"]

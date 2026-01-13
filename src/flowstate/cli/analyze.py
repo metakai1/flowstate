@@ -1,10 +1,10 @@
 """CLI commands for track analysis."""
 
+import sys
 from pathlib import Path
 
 import click
 from rich.console import Console
-from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
 
 from ..analysis import AudioScanner, GeminiAnalyzer
 from ..models import Corpus
@@ -57,6 +57,7 @@ def analyze(
     new_files = [f for f in audio_files if f.file_hash not in existing_hashes]
 
     console.print(f"Found [cyan]{len(audio_files)}[/cyan] audio files")
+    console.print(f"Already analyzed: [dim]{len(audio_files) - len(new_files)}[/dim]")
     console.print(f"New files to analyze: [cyan]{len(new_files)}[/cyan]")
 
     if max_tracks:
@@ -74,41 +75,45 @@ def analyze(
         console.print(f"\n[dim]Dry run - no analysis performed[/dim]")
         return
 
-    # Analyze with Gemini
+    # Analyze with Gemini - ONE AT A TIME with incremental saves
     console.print(f"\n[bold]Analyzing with Gemini 2.5 Pro...[/bold]")
-    console.print(f"[dim]Estimated cost: ~${len(new_files) * 0.05:.2f}[/dim]\n")
+    console.print(f"[dim]Estimated cost: ~${len(new_files) * 0.05:.2f}[/dim]")
+    console.print(f"[dim]Saving after each track for robustness[/dim]\n")
 
     analyzer = GeminiAnalyzer()
     success_count = 0
     fail_count = 0
+    total = len(new_files)
 
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        BarColumn(),
-        TaskProgressColumn(),
-        console=console,
-    ) as progress:
-        task = progress.add_task("Analyzing...", total=len(new_files))
+    for i, audio_file in enumerate(new_files, 1):
+        # Progress indicator (works in background/non-TTY mode)
+        pct = (i / total) * 100
+        status_prefix = f"[{i:3d}/{total}] ({pct:5.1f}%)"
 
-        def on_progress(current: int, total: int, title: str, success: bool):
-            nonlocal success_count, fail_count
-            if success:
+        # Flush output for real-time progress
+        print(f"{status_prefix} Analyzing: {audio_file.artist} - {audio_file.title}...", end="", flush=True)
+
+        try:
+            track = analyzer.analyze_sync(audio_file)
+
+            if track:
+                corpus.add(track)
+                corpus.save(output_path)  # Save after EACH successful track
                 success_count += 1
-                progress.update(task, description=f"[green]✓[/green] {title[:40]}")
+                print(f" ✓", flush=True)
             else:
                 fail_count += 1
-                progress.update(task, description=f"[red]✗[/red] {title[:40]}")
-            progress.advance(task)
+                print(f" ✗ (parse error)", flush=True)
 
-        tracks = analyzer.analyze_batch_sync(new_files, progress_callback=on_progress)
+        except KeyboardInterrupt:
+            print(f"\n\n[yellow]Interrupted! Saving progress...[/yellow]")
+            corpus.save(output_path)
+            console.print(f"Saved {len(corpus.tracks)} tracks to {output_path}")
+            raise SystemExit(0)
 
-    # Add to corpus
-    for track in tracks:
-        corpus.add(track)
-
-    # Save corpus
-    corpus.save(output_path)
+        except Exception as e:
+            fail_count += 1
+            print(f" ✗ ({e})", flush=True)
 
     # Summary
     console.print(f"\n[bold]Analysis complete![/bold]")
