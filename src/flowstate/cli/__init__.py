@@ -4,7 +4,9 @@ import click
 
 from .analyze import analyze
 from .corpus import corpus
+from .download_videos import download_videos
 from .run import run
+from .write_metadata import write_metadata
 
 
 @click.group()
@@ -20,7 +22,9 @@ def main():
 
 main.add_command(analyze)
 main.add_command(corpus)
+main.add_command(download_videos)
 main.add_command(run)
+main.add_command(write_metadata)
 
 
 if __name__ == "__main__":

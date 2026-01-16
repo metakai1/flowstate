@@ -15,7 +15,8 @@ console = Console()
 @click.option("-c", "--corpus", "corpus_path", default="data/corpus.json", help="Corpus file")
 @click.option("--ui", type=click.Choice(["terminal", "web"]), default="terminal", help="UI mode")
 @click.option("--port", type=int, default=5000, help="Web UI port")
-def run(corpus_path: str, ui: str, port: int):
+@click.option("--rekordbox/--no-rekordbox", default=True, help="Enable Rekordbox sync")
+def run(corpus_path: str, ui: str, port: int, rekordbox: bool):
     """Run the live recommendation UI.
 
     Example:
@@ -37,9 +38,10 @@ def run(corpus_path: str, ui: str, port: int):
     engine = RecommendationEngine(corpus, ScoringConfig())
 
     if ui == "terminal":
-        from ..ui.terminal import TerminalUI
-        terminal_ui = TerminalUI(corpus, engine)
-        terminal_ui.run()
+        from ..ui.terminal import Dashboard
+        dashboard = Dashboard(corpus, engine, rekordbox_sync=rekordbox)
+        dashboard.run()
     else:
-        console.print("[yellow]Web UI not yet implemented[/yellow]")
-        raise SystemExit(1)
+        from ..ui.web import WebUI
+        web_ui = WebUI(corpus, engine, rekordbox_sync=rekordbox)
+        web_ui.run(port=port)

@@ -1,6 +1,9 @@
 """Rich terminal dashboard UI for live recommendations."""
 
 import random
+import sys
+import tty
+import termios
 from datetime import datetime
 from typing import Optional
 
@@ -11,15 +14,16 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 from rich import box
+from rich.columns import Columns
 
 from ..models import Corpus, Direction, Recommendations, ScoredTrack, Track
 from ..engine import RecommendationEngine
 
 
 class Dashboard:
-    """Live-updating DJ dashboard."""
+    """Live-updating DJ dashboard centered on the current track."""
 
-    def __init__(self, corpus: Corpus, engine: RecommendationEngine):
+    def __init__(self, corpus: Corpus, engine: RecommendationEngine, rekordbox_sync: bool = True):
         self.corpus = corpus
         self.engine = engine
         self.console = Console()
@@ -27,126 +31,110 @@ class Dashboard:
         self.recommendations: Optional[Recommendations] = None
         self.set_history: list[Track] = []
         self.set_start_time: Optional[datetime] = None
-
-    def _make_layout(self) -> Layout:
-        """Create the dashboard layout."""
-        layout = Layout()
-
-        layout.split_column(
-            Layout(name="header", size=3),
-            Layout(name="main"),
-            Layout(name="footer", size=3),
-        )
-
-        layout["main"].split_row(
-            Layout(name="left", ratio=1),
-            Layout(name="right", ratio=2),
-        )
-
-        layout["left"].split_column(
-            Layout(name="now_playing", ratio=2),
-            Layout(name="set_info", ratio=1),
-        )
-
-        layout["right"].split_column(
-            Layout(name="up", ratio=1),
-            Layout(name="hold", ratio=1),
-            Layout(name="down", ratio=1),
-        )
-
-        return layout
+        self.rekordbox_sync = rekordbox_sync
+        self._rb_monitor = None
+        self._rb_available = False
 
     def _render_header(self) -> Panel:
         """Render the header."""
-        grid = Table.grid(expand=True)
-        grid.add_column(justify="left", ratio=1)
-        grid.add_column(justify="center", ratio=1)
-        grid.add_column(justify="right", ratio=1)
+        set_time = ""
+        if self.set_start_time:
+            elapsed = datetime.now() - self.set_start_time
+            mins = int(elapsed.total_seconds() // 60)
+            set_time = f"  │  Set: {mins}min | {len(self.set_history)} tracks"
 
-        grid.add_row(
-            "[bold cyan]FLOWSTATE[/bold cyan]",
-            f"[dim]Corpus: {len(self.corpus.tracks)} tracks[/dim]",
-            f"[dim]{datetime.now().strftime('%H:%M:%S')}[/dim]",
-        )
+        rb_status = "[green]●[/green] RB" if self._rb_available else "[dim]○[/dim] RB"
+        time_str = datetime.now().strftime('%H:%M:%S')
 
-        return Panel(grid, style="white on dark_blue", box=box.SIMPLE)
+        header_text = f"[bold cyan]FLOWSTATE[/bold cyan]  │  {rb_status}{set_time}  │  {time_str}"
+        return Panel(header_text, box=box.SIMPLE, style="white on dark_blue")
 
     def _render_now_playing(self) -> Panel:
         """Render the current track panel."""
         if not self.current_track:
             return Panel(
-                "[dim]No track selected\n\nPress [bold]s[/bold] to search[/dim]",
-                title="[bold]NOW PLAYING[/bold]",
+                "[dim]No track selected - press [bold]s[/bold] to search[/dim]",
+                title="[bold cyan]NOW PLAYING[/bold cyan]",
                 border_style="cyan",
-                box=box.ROUNDED,
             )
 
         t = self.current_track
         vibe = t.vibe if isinstance(t.vibe, str) else t.vibe.value
+        intensity = t.intensity if isinstance(t.intensity, str) else t.intensity.value
+
+        # Build compact display
+        lines = []
+        lines.append(f"[bold white]{t.title}[/bold white]")
+        lines.append(f"[cyan]{t.artist}[/cyan]")
+        lines.append("")
+        lines.append(f"[yellow]{t.bpm:.0f}[/yellow] BPM  │  Key [yellow]{t.key}[/yellow]  │  {int(t.duration_seconds//60)}:{int(t.duration_seconds%60):02d}")
 
         # Energy bar
         energy_bar = "█" * t.energy + "░" * (10 - t.energy)
-        dance_bar = "█" * t.danceability + "░" * (10 - t.danceability)
+        energy_color = "green" if t.energy >= 7 else "yellow" if t.energy >= 4 else "red"
+        lines.append(f"Energy [{energy_color}]{energy_bar}[/{energy_color}] {t.energy}")
 
-        content = Text()
-        content.append(f"{t.title}\n", style="bold cyan")
-        content.append(f"{t.artist}\n\n", style="dim")
-        content.append(f"BPM: {t.bpm:.0f}  Key: {t.key}\n")
-        content.append(f"Energy:      [{energy_bar}] {t.energy}\n", style="green" if t.energy >= 7 else "yellow" if t.energy >= 4 else "red")
-        content.append(f"Danceability:[{dance_bar}] {t.danceability}\n", style="green" if t.danceability >= 7 else "yellow")
-        content.append(f"\nVibe: {vibe} | {t.intensity}\n", style="magenta")
-
-        if t.mixability_notes:
-            content.append(f"\n[Mix tip] {t.mixability_notes[:60]}...\n", style="dim italic")
+        # Vibe and intensity
+        lines.append(f"[magenta]{vibe}[/magenta] │ [yellow]{intensity}[/yellow]")
 
         return Panel(
-            content,
-            title="[bold]NOW PLAYING[/bold]",
+            "\n".join(lines),
+            title="[bold cyan]NOW PLAYING[/bold cyan]",
             border_style="cyan",
-            box=box.ROUNDED,
         )
 
-    def _render_set_info(self) -> Panel:
-        """Render set history and stats."""
+    def _render_track_info(self) -> Panel:
+        """Render track analysis info."""
+        if not self.current_track:
+            return Panel("", title="INFO", border_style="blue")
+
+        t = self.current_track
+        groove = t.groove_style if isinstance(t.groove_style, str) else t.groove_style.value
+        vocal = t.vocal_presence if isinstance(t.vocal_presence, str) else t.vocal_presence.value
+
         lines = []
 
-        if self.set_start_time:
-            elapsed = datetime.now() - self.set_start_time
-            mins = int(elapsed.total_seconds() // 60)
-            lines.append(f"Set time: {mins} min")
+        # Mixability
+        lines.append(f"[bold]Mix:[/bold] In={t.mix_in_ease} Out={t.mix_out_ease}")
+        if t.mixability_notes:
+            lines.append(f"[dim]{t.mixability_notes[:60]}...[/dim]")
 
-        lines.append(f"Tracks played: {len(self.set_history)}")
+        # Character
+        lines.append(f"[bold]Feel:[/bold] {groove} │ {t.tempo_feel}")
+        lines.append(f"[bold]Vocals:[/bold] {vocal} │ {t.vocal_style}")
 
-        if self.set_history:
-            lines.append("\n[dim]Recent:[/dim]")
-            for track in self.set_history[-3:]:
-                lines.append(f"  • {track.title[:25]}")
+        # Structure
+        if t.structure:
+            struct = " → ".join(t.structure[:6])
+            lines.append(f"[bold]Structure:[/bold] {struct}")
+
+        # Description
+        lines.append("")
+        lines.append(f"[italic]{t.description[:100]}...[/italic]")
 
         return Panel(
-            "\n".join(lines) if lines else "[dim]Set not started[/dim]",
-            title="[bold]SET INFO[/bold]",
+            "\n".join(lines),
+            title="[bold]ANALYSIS[/bold]",
             border_style="blue",
-            box=box.ROUNDED,
         )
 
-    def _render_direction(self, name: str, tracks: list[ScoredTrack], color: str, arrow: str) -> Panel:
-        """Render a recommendation direction panel."""
+    def _render_recommendations(self, name: str, tracks: list[ScoredTrack], color: str, arrow: str) -> Panel:
+        """Render a recommendation panel."""
         if not tracks:
             return Panel(
-                "[dim]No compatible tracks[/dim]",
+                "[dim]No matches[/dim]",
                 title=f"[bold {color}]{arrow} {name}[/bold {color}]",
                 border_style=color,
-                box=box.ROUNDED,
             )
 
         table = Table(show_header=True, box=None, padding=(0, 1), expand=True)
-        table.add_column("#", style="dim", width=2)
-        table.add_column("Title", style="cyan", no_wrap=True)
-        table.add_column("Artist", no_wrap=True)
+        table.add_column("#", style="bold", width=2)
+        table.add_column("Title", style="white", no_wrap=True)
+        table.add_column("Artist", style="cyan", no_wrap=True)
         table.add_column("BPM", justify="right", width=4)
         table.add_column("Key", width=3)
         table.add_column("E", justify="center", width=2)
-        table.add_column("Score", justify="right", width=4)
+        table.add_column("Score", justify="right", width=5)
 
         for i, scored in enumerate(tracks[:5], 1):
             t = scored.track
@@ -155,8 +143,8 @@ class Dashboard:
 
             table.add_row(
                 str(i),
-                t.title[:28],
-                t.artist[:15],
+                t.title[:20],
+                t.artist[:12],
                 f"{t.bpm:.0f}",
                 t.key,
                 Text(str(t.energy), style=energy_style),
@@ -165,43 +153,37 @@ class Dashboard:
 
         return Panel(
             table,
-            title=f"[bold {color}]{arrow} {name}[/bold {color}]",
-            subtitle=f"[dim]{len(tracks)} options[/dim]",
+            title=f"[bold {color}]{arrow} {name}[/bold {color}] ({len(tracks)})",
             border_style=color,
-            box=box.ROUNDED,
         )
 
     def _render_footer(self) -> Panel:
         """Render the footer with controls."""
-        controls = (
-            "[bold]s[/bold] search  "
-            "[bold]1-5[/bold] select UP  "
-            "[bold]u/h/d[/bold]+1-5 select direction  "
-            "[bold]r[/bold] refresh  "
-            "[bold]i[/bold] info  "
-            "[bold]q[/bold] quit"
-        )
-        return Panel(controls, style="dim", box=box.SIMPLE)
+        controls = "[bold]s[/bold] search  │  [bold]1-5[/bold] UP  │  [bold]u/h/d[/bold]+# direction  │  [bold]r[/bold] refresh  │  [bold]q[/bold] quit"
+        return Panel(controls, box=box.SIMPLE, style="dim")
 
-    def _render_dashboard(self) -> Layout:
-        """Render the full dashboard."""
-        layout = self._make_layout()
+    def _render_dashboard(self) -> Group:
+        """Render the full dashboard as a simple vertical stack."""
+        elements = []
 
-        layout["header"].update(self._render_header())
-        layout["now_playing"].update(self._render_now_playing())
-        layout["set_info"].update(self._render_set_info())
-        layout["footer"].update(self._render_footer())
+        # Header
+        elements.append(self._render_header())
 
-        if self.recommendations:
-            layout["up"].update(self._render_direction("UP", self.recommendations.up, "green", "↑"))
-            layout["hold"].update(self._render_direction("HOLD", self.recommendations.hold, "yellow", "→"))
-            layout["down"].update(self._render_direction("DOWN", self.recommendations.down, "red", "↓"))
-        else:
-            layout["up"].update(Panel("[dim]Select a track to see recommendations[/dim]", title="↑ UP", border_style="green"))
-            layout["hold"].update(Panel("", title="→ HOLD", border_style="yellow"))
-            layout["down"].update(Panel("", title="↓ DOWN", border_style="red"))
+        # Now playing + Info side by side using Columns
+        now_playing = self._render_now_playing()
+        track_info = self._render_track_info()
+        elements.append(Columns([now_playing, track_info], equal=True, expand=True))
 
-        return layout
+        # Recommendations in a row
+        up_panel = self._render_recommendations("UP", self.recommendations.up if self.recommendations else [], "green", "↑")
+        hold_panel = self._render_recommendations("HOLD", self.recommendations.hold if self.recommendations else [], "yellow", "→")
+        down_panel = self._render_recommendations("DOWN", self.recommendations.down if self.recommendations else [], "red", "↓")
+        elements.append(Columns([up_panel, hold_panel, down_panel], equal=True, expand=True))
+
+        # Footer
+        elements.append(self._render_footer())
+
+        return Group(*elements)
 
     def _select_track(self, track: Track):
         """Select a track and update recommendations."""
@@ -238,10 +220,10 @@ class Dashboard:
 
             self.console.print()
             for i, track in enumerate(results, 1):
-                energy_bar = "█" * track.energy + "░" * (10 - track.energy)
+                vibe = track.vibe if isinstance(track.vibe, str) else track.vibe.value
                 self.console.print(
-                    f"  [cyan]{i:2d}[/cyan]. {track.title[:35]:35s} - {track.artist[:18]:18s} "
-                    f"[dim]{track.bpm:3.0f} {track.key:3s}[/dim] [{energy_bar}]"
+                    f"  [cyan]{i:2d}[/cyan]. {track.title[:30]:30s} - {track.artist[:15]:15s} "
+                    f"[dim]{track.bpm:3.0f} {track.key:3s}[/dim] E={track.energy} {vibe}"
                 )
 
             self.console.print("\n[dim]Enter number to select, new search, or 'q' to cancel[/dim]")
@@ -256,130 +238,132 @@ class Dashboard:
                     return results[idx]
             except ValueError:
                 if choice:
-                    # Treat as new search query
-                    query = choice
-                    results = self._search_tracks(query)
                     continue
 
-    def _show_track_info(self):
-        """Show detailed track info popup."""
-        if not self.current_track:
+    def _getch(self):
+        """Get a single character from stdin without waiting for enter."""
+        fd = sys.stdin.fileno()
+        old_settings = termios.tcgetattr(fd)
+        try:
+            tty.setraw(sys.stdin.fileno())
+            ch = sys.stdin.read(1)
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+        return ch
+
+    def _start_rekordbox_sync(self):
+        """Start Rekordbox sync if available."""
+        if not self.rekordbox_sync:
             return
 
-        t = self.current_track
-        self.console.clear()
-        self.console.print(f"\n[bold cyan]{t.title}[/bold cyan]")
-        self.console.print(f"[dim]{t.artist}[/dim]\n")
+        try:
+            from ..integrations.rekordbox import RekordboxMonitor
 
-        self.console.print(f"[bold]Audio[/bold]")
-        self.console.print(f"  BPM: {t.bpm:.1f} | Key: {t.key} | Duration: {t.duration_seconds:.0f}s")
+            def on_track_change(track: Track):
+                self._select_track(track)
 
-        self.console.print(f"\n[bold]Energy & Feel[/bold]")
-        self.console.print(f"  Energy: {t.energy}/10 | Danceability: {t.danceability}/10")
-        self.console.print(f"  Vibe: {t.vibe} | Intensity: {t.intensity} | Groove: {t.groove_style}")
+            self._rb_monitor = RekordboxMonitor(
+                self.corpus,
+                on_track_change=on_track_change,
+                poll_interval=2.0,
+            )
 
-        self.console.print(f"\n[bold]Vocals[/bold]")
-        self.console.print(f"  {t.vocal_presence} | {t.vocal_style} | {t.language or 'N/A'}")
+            if self._rb_monitor.start():
+                self._rb_available = True
+                self.console.print("[green]✓[/green] Rekordbox sync enabled")
+            else:
+                self.console.print("[yellow]![/yellow] Rekordbox not available - using manual mode")
 
-        self.console.print(f"\n[bold]Mixability[/bold]")
-        self.console.print(f"  In: {t.mix_in_ease}/10 | Out: {t.mix_out_ease}/10")
-        if t.mixability_notes:
-            self.console.print(f"  [italic]{t.mixability_notes}[/italic]")
+        except ImportError:
+            self.console.print("[dim]Rekordbox integration not available[/dim]")
+        except Exception as e:
+            self.console.print(f"[yellow]Rekordbox sync error: {e}[/yellow]")
 
-        self.console.print(f"\n[bold]Production[/bold]")
-        self.console.print(f"  Quality: {t.production_quality}/10 | Fidelity: {t.audio_fidelity}/10")
-        if t.instrumentation:
-            self.console.print(f"  Sounds: {', '.join(t.instrumentation[:5])}")
-
-        self.console.print(f"\n[bold]Structure[/bold]")
-        if t.structure:
-            self.console.print(f"  {' → '.join(t.structure)}")
-        if t.drop_intensity:
-            self.console.print(f"  Drop: {t.drop_intensity}/10")
-
-        self.console.print(f"\n[bold]Description[/bold]")
-        self.console.print(f"  [italic]{t.description}[/italic]")
-
-        if self.recommendations:
-            self.console.print(f"\n[bold]Score Breakdown (Top UP pick):[/bold]")
-            if self.recommendations.up:
-                scored = self.recommendations.up[0]
-                for fs in sorted(scored.factor_scores, key=lambda x: -x.weighted_score)[:5]:
-                    bar = "█" * int(fs.score * 10) + "░" * (10 - int(fs.score * 10))
-                    self.console.print(f"  {fs.name:18s} [{bar}] {fs.weighted_score:.2f}")
-
-        self.console.input("\n[dim]Press Enter to return...[/dim]")
+    def _stop_rekordbox_sync(self):
+        """Stop Rekordbox monitoring."""
+        if self._rb_monitor:
+            self._rb_monitor.stop()
+            self._rb_monitor = None
 
     def run(self):
         """Run the dashboard."""
-        # Initial track selection
-        selected = self._show_search_popup()
-        if selected:
-            self._select_track(selected)
+        # Start Rekordbox sync
+        self._start_rekordbox_sync()
 
-        # Main dashboard loop
-        with Live(self._render_dashboard(), console=self.console, refresh_per_second=1, screen=True) as live:
+        # Try to get current track from Rekordbox first
+        if self._rb_available:
+            try:
+                from ..integrations.rekordbox import get_now_playing
+                rb_track = get_now_playing(self.corpus)
+                if rb_track:
+                    self._select_track(rb_track)
+                    self.console.print(f"[cyan]▶[/cyan] Synced: {rb_track.artist} - {rb_track.title}")
+            except Exception:
+                pass
+
+        # If no track from Rekordbox, show search
+        if not self.current_track:
+            selected = self._show_search_popup()
+            if selected:
+                self._select_track(selected)
+            elif not self.current_track:
+                self._stop_rekordbox_sync()
+                return
+
+        # Main dashboard loop with Live display
+        with Live(self._render_dashboard(), console=self.console, refresh_per_second=2, screen=True) as live:
             while True:
                 try:
-                    # Non-blocking input check
-                    import sys
-                    import select
-
-                    # Update display
                     live.update(self._render_dashboard())
 
-                    # Check for input (with timeout)
-                    if select.select([sys.stdin], [], [], 0.5)[0]:
-                        key = sys.stdin.read(1)
+                    # Get keypress
+                    key = self._getch()
 
-                        if key == "q":
-                            break
+                    if key == "q" or key == "\x03":  # q or Ctrl+C
+                        break
 
-                        elif key == "s":
-                            live.stop()
-                            selected = self._show_search_popup()
-                            if selected:
-                                self._select_track(selected)
-                            live.start()
+                    elif key == "s":
+                        live.stop()
+                        selected = self._show_search_popup()
+                        if selected:
+                            self._select_track(selected)
+                        live.start()
 
-                        elif key == "i":
-                            live.stop()
-                            self._show_track_info()
-                            live.start()
+                    elif key == "r":
+                        if self.current_track:
+                            self.recommendations = self.engine.recommend(self.current_track)
 
-                        elif key == "r":
-                            if self.current_track:
-                                self.recommendations = self.engine.recommend(self.current_track)
+                    elif key in "12345" and self.recommendations and self.recommendations.up:
+                        idx = int(key) - 1
+                        if idx < len(self.recommendations.up):
+                            self._select_track(self.recommendations.up[idx].track)
 
-                        elif key in "12345" and self.recommendations and self.recommendations.up:
-                            idx = int(key) - 1
+                    elif key == "u":
+                        num = self._getch()
+                        if num in "12345" and self.recommendations and self.recommendations.up:
+                            idx = int(num) - 1
                             if idx < len(self.recommendations.up):
                                 self._select_track(self.recommendations.up[idx].track)
 
-                        elif key == "u":
-                            # Wait for number
-                            num = sys.stdin.read(1)
-                            if num in "12345" and self.recommendations and self.recommendations.up:
-                                idx = int(num) - 1
-                                if idx < len(self.recommendations.up):
-                                    self._select_track(self.recommendations.up[idx].track)
+                    elif key == "h":
+                        num = self._getch()
+                        if num in "12345" and self.recommendations and self.recommendations.hold:
+                            idx = int(num) - 1
+                            if idx < len(self.recommendations.hold):
+                                self._select_track(self.recommendations.hold[idx].track)
 
-                        elif key == "h":
-                            num = sys.stdin.read(1)
-                            if num in "12345" and self.recommendations and self.recommendations.hold:
-                                idx = int(num) - 1
-                                if idx < len(self.recommendations.hold):
-                                    self._select_track(self.recommendations.hold[idx].track)
-
-                        elif key == "d":
-                            num = sys.stdin.read(1)
-                            if num in "12345" and self.recommendations and self.recommendations.down:
-                                idx = int(num) - 1
-                                if idx < len(self.recommendations.down):
-                                    self._select_track(self.recommendations.down[idx].track)
+                    elif key == "d":
+                        num = self._getch()
+                        if num in "12345" and self.recommendations and self.recommendations.down:
+                            idx = int(num) - 1
+                            if idx < len(self.recommendations.down):
+                                self._select_track(self.recommendations.down[idx].track)
 
                 except KeyboardInterrupt:
                     break
+
+        # Cleanup
+        self._stop_rekordbox_sync()
 
 
 # Keep old class for compatibility
