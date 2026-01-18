@@ -4,19 +4,15 @@
 
 FLOWSTATE is a DJ decision support system that analyzes music libraries using AI and provides real-time track recommendations during live sets based on energy, key compatibility, vibe, and danceability.
 
-**Target:** Gig-ready in 20 days
-**Author:** Kai
-
 ## Tech Stack
 
 - **Language:** Python 3.11+
-- **AI:** Google Generative AI (Gemini 3)
+- **AI:** Google Generative AI (Gemini 2.5 Pro)
 - **Audio Metadata:** Mutagen 1.47+
 - **Data Validation:** Pydantic 2.0+
-- **Terminal UI:** Rich 13.0+
-- **Web UI (optional):** Flask + HTMX 3.0+
-- **Database:** SQLite (Rekordbox integration)
-- **Config:** YAML + Pydantic Settings
+- **Web UI:** Flask + vanilla JS
+- **Database:** SQLite (Rekordbox integration via pyrekordbox)
+- **Video Downloads:** yt-dlp
 
 ## Project Structure
 
@@ -24,18 +20,24 @@ FLOWSTATE is a DJ decision support system that analyzes music libraries using AI
 flowstate/
 ├── src/flowstate/
 │   ├── __init__.py
-│   ├── models/           # Pydantic data models (Track, Corpus, Recommendations)
-│   ├── analyzer/         # Gemini audio analysis pipeline
-│   ├── scanner/          # Audio file scanner with Mutagen
+│   ├── models/           # Pydantic data models (Track, Corpus)
+│   ├── analysis/         # Gemini audio analysis + scanner
 │   ├── engine/           # Recommendation engine with scoring factors
-│   ├── rekordbox/        # Rekordbox DB integration
-│   ├── ui/               # Terminal (Rich) and Web (Flask) UIs
-│   └── cli.py            # Click CLI entry points
-├── config/               # YAML configuration files
+│   ├── integrations/     # Rekordbox DB integration
+│   ├── ui/               # Web UI (Flask)
+│   └── cli/              # Click CLI entry points
 ├── data/                 # Corpus JSON files
 ├── design/               # Design documents
-├── tests/                # Pytest tests
 └── pyproject.toml
+```
+
+## Running the App
+
+```bash
+# Web UI with Rekordbox sync
+flowstate run --ui web --rekordbox
+
+# Then open http://localhost:5000
 ```
 
 ## Core Concepts
@@ -52,57 +54,68 @@ flowstate/
 - **Intensity:** opener | journey | peak | closer
 - **Key:** Camelot notation (1A-12A, 1B-12B)
 - **Groove Style:** four-on-floor | broken | swung | syncopated | linear
-- **Description:** Concise artistic description of the track (AI-generated) - stored in corpus
-
-### Gemini Analysis Output
-The Gemini 3 analysis prompt must return:
-- All standard track metadata (BPM, key, energy, etc.)
-- A **concise artistic track description** (1-2 sentences capturing the essence/mood)
+- **Description:** Concise artistic description of the track (AI-generated)
 
 ### Scoring Factors (by weight)
 1. Energy Trajectory (1.0) - Primary factor
-2. Danceability (0.8) - Keep the floor moving
-3. Vibe Compatibility (0.7) - Mood transitions
-4. Narrative Flow (0.6) - Set position progression
+2. Danceability (0.8)
+3. Vibe Compatibility (0.7)
+4. Narrative Flow (0.6)
 5. Key Quality (0.5) - Harmonic compatibility (Camelot wheel)
-6. Groove Compatibility (0.4) - Rhythm style transitions
-7. Mix Ease (0.4) - Technical mixability
-8. Genre Affinity (0.3) - Genre match bonus
+6. Groove Compatibility (0.4)
+7. Mix Ease (0.4)
+8. Genre Affinity (0.3)
 
-## Key Commands
+## CLI Commands
 
 ```bash
-# Analyze tracks
-python -m flowstate.analyze ~/Music/DJ/kpop/ -o data/corpus.json
+# Analyze tracks with Gemini
+flowstate analyze ~/Music/DJ/ -o data/corpus.json
 
-# Run live recommendations
-python -m flowstate.live
+# Run web UI
+flowstate run --ui web --rekordbox
 
-# Export corpus for review
-python -m flowstate.corpus export data/corpus.json -o data/review.csv
+# Corpus management
+flowstate corpus stats data/corpus.json
+flowstate corpus export data/corpus.json -o review.csv
 
-# Show corpus stats
-python -m flowstate.corpus stats data/corpus.json
+# Write metadata to WAV files
+flowstate write-metadata /path/to/wav/files
+
+# Download music videos
+flowstate download-videos -o /path/to/videos
 ```
 
-## Development Guidelines
+## Web UI Layout
 
-1. **Keep it simple** - MVP focused, gig-ready in 20 days
-2. **Use Pydantic** for all data models with validation
-3. **Gemini 3** for audio analysis (not 2.5)
-4. **Rekordbox DB polling** instead of Pro DJ Link (simpler)
-5. **Terminal UI first** (Rich), web UI optional
-6. **JSON corpus** - no complex database needed
-7. **Configurable weights** via YAML for scoring tuning
+The web interface has a side-by-side layout:
+- **Left:** Now Playing (from Rekordbox) with stats and mix-out notes
+- **Right:** Track Preview (click any recommendation to compare)
+- **Below:** 3-column recommendation grid (UP / HOLD / DOWN)
 
-## Important Notes
+Press `R` to force-refresh from Rekordbox.
 
-- The Gemini analysis prompt must include generating a **concise artistic track description** to be stored with each track
+## Rekordbox Integration
+
+- Reads from Rekordbox 6 SQLite database via pyrekordbox
+- Database path auto-detected or configurable
+- Polls history table for most recently loaded track
+- WAL checkpoint performed on each refresh to get latest data
+- **Limitation:** Rekordbox batches DB writes, so expect 10-30s delay
+
+## Video Support
+
+```bash
+flowstate download-videos -o ~/Music/kpop-videos
+```
+
+- Downloads from YouTube using yt-dlp
+- Saves as MP4 with artist/title metadata
+- Rekordbox-compatible format (H.264, up to 1080p)
+- Manual linking required in Rekordbox (LINK button)
+
+## Development Notes
+
 - BPM tolerance: ±6 BPM for recommendations
 - Key compatibility uses extended Camelot wheel (2-step compatible)
-- Poll Rekordbox DB every 5 seconds for track changes
-- Cost estimate: ~$0.05/track for Gemini analysis
-
-## Design Document
-
-Full specification available at: `design/flowstate-mvp-design-doc.md`
+- Corpus stored as JSON with incremental saves
